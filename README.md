@@ -30,8 +30,8 @@ Featuring a smooth autohide mechanism, it tucks away quietly at the bottom of th
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your_username/neurodock.git
-cd neurodock
+git clone https://github.com/slovjinika/NeuroDock.git
+cd NeuroDock
 
 ```
 
@@ -70,4 +70,4 @@ APPS_DATA = [
 
 ## 📄 License
 
-Distributed under the [MIT License](https://www.google.com/search?q=LICENSE). Feel free to use, fork, and adapt it to your needs.
+Distributed under the MIT License. Feel free to use, fork, and adapt it to your needs.
