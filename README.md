@@ -1,4 +1,4 @@
-![image](NeuroDock.png).
+![image](NeuroDock.png)
 
 # 🧠 NeuroDock
 
