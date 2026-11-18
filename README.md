@@ -1,3 +1,5 @@
+![image](NeuroDock.png).
+
 # 🧠 NeuroDock
 
 **NeuroDock** is a lightweight, self-organizing floating panel for Linux built with Python and Tkinter. Moving away from static docks, NeuroDock monitors your daily workflow and **dynamically reorganizes your applications** based on usage frequency (click count)—putting your most essential tools right where you need them.
