@@ -1,13 +1,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <json-glib/json-glib.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define FULL_HEIGHT 46
 #define HIDDEN_HEIGHT 4
@@ -377,8 +373,13 @@ static void launch_detached(const char *cmd) {
         return;
     }
 
+    const char *home_dir = g_get_home_dir();
+
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_NONE);
     g_subprocess_launcher_set_flags(launcher, G_SUBPROCESS_FLAGS_NONE);
+    if (home_dir && *home_dir) {
+        g_subprocess_launcher_set_cwd(launcher, home_dir);
+    }
 
     GSubprocess *proc = g_subprocess_launcher_spawnv(launcher, (const gchar *const *)argv, &error);
     if (!proc) {
@@ -411,10 +412,13 @@ typedef struct {
 static void on_reset_clicks(GtkMenuItem *item, gpointer user_data) {
     (void)item;
     AppActionCtx *ctx = (AppActionCtx *)user_data;
-    ctx->app->clicks = 0;
-    save_clicks(ctx->dock, TRUE);
-    rebuild_dock_ui(ctx->dock);
-    show_panel_now(ctx->dock);
+    DockApp *dock = ctx->dock;
+    AppEntry *app = ctx->app;
+
+    app->clicks = 0;
+    save_clicks(dock, TRUE);
+    rebuild_dock_ui(dock);
+    show_panel_now(dock);
 }
 
 static void on_quit_dock(GtkMenuItem *item, gpointer user_data) {
@@ -458,11 +462,14 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 static void on_app_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     AppActionCtx *ctx = (AppActionCtx *)user_data;
-    ctx->app->clicks += 1;
-    save_clicks(ctx->dock, TRUE);
-    launch_detached(ctx->app->cmd);
-    rebuild_dock_ui(ctx->dock);
-    show_panel_now(ctx->dock);
+    DockApp *dock = ctx->dock;
+    AppEntry *app = ctx->app;
+
+    app->clicks += 1;
+    save_clicks(dock, TRUE);
+    launch_detached(app->cmd);
+    rebuild_dock_ui(dock);
+    show_panel_now(dock);
 }
 
 static void clear_container_cb(GtkWidget *widget, gpointer user_data) {
@@ -502,6 +509,11 @@ static void rebuild_dock_ui(DockApp *dock) {
 
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
+
+    const char *home_dir = g_get_home_dir();
+    if (home_dir && *home_dir) {
+        g_chdir(home_dir);
+    }
 
     char *exe_path = g_file_read_link("/proc/self/exe", NULL);
     char *base_dir = exe_path ? g_path_get_dirname(exe_path) : g_get_current_dir();
