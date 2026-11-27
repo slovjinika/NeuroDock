@@ -255,7 +255,7 @@ static void setup_dock_css(GtkWidget *window) {
     GtkCssProvider *provider = gtk_css_provider_new();
     const char *css =
         "window.dock-strip {"
-        "  background-color: rgba(120, 120, 120, 0.65);"
+        "  background-color: rgba(211, 211, 211, 0.85);"
         "  border-radius: 3px 3px 0 0;"
         "  min-height: 0;"
         "  min-width: 0;"
