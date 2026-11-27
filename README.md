@@ -68,6 +68,23 @@ APPS_DATA = [
 
 ```
 
+
+# NeuroDock.c
+
+Lightweight GTK 3 and `json-glib` dock panel that auto-hides into a thin strip at the bottom edge of the screen and sorts apps by click count.
+
+## Dependencies
+
+* `gcc` and `pkg-config`
+* GTK 3 and `json-glib-1.0` development headers (on Debian/Ubuntu: `sudo apt install build-essential pkg-config libgtk-3-dev libjson-glib-dev`)
+
+## Build and Run
+
+```bash
+gcc -O2 -Wall -Wextra NeuroDock.c -o dock $(pkg-config --cflags --libs gtk+-3.0 json-glib-1.0)
+./dock
+```
+
 ---
 
 ## 📄 License
