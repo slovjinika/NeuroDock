@@ -1,15 +1,19 @@
 import json
+import logging
 import os
+from pathlib import Path
+import shlex
 import subprocess
 import tkinter as tk
 from PIL import Image, ImageTk
 
-# Визначаємо шлях до папки, де лежить скрипт, щоб файл data завжди зберігався поруч
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "stopwatchdata")
+logging.basicConfig(level=logging.WARNING, format="[%(levelname)s] %(message)s")
 
-# Дані додатків
-APPS_DATA = [
+BASE_DIR = Path(__file__).resolve().parent
+DATA_FILE = BASE_DIR / "dock_clicks.json"
+BACKUP_FILE = BASE_DIR / "dock_clicks.json.bak"
+
+DEFAULT_APPS = [
     {"name": "Firefox", "cmd": "firefox", "icon_names": ["firefox", "browser"], "clicks": 0},
     {"name": "GIMP", "cmd": "gimp", "icon_names": ["gimp"], "clicks": 0},
     {"name": "Word", "cmd": "libreoffice --writer", "icon_names": ["libreoffice-writer"], "clicks": 0},
@@ -21,175 +25,241 @@ APPS_DATA = [
     {"name": "Draw", "cmd": "libreoffice --draw", "icon_names": ["libreoffice-draw"], "clicks": 0},
 ]
 
-LOADED_IMAGES = {}
-CURRENT_PANEL_WIDTH = 300
-FULL_HEIGHT = 42
-HIDDEN_HEIGHT = 4
-hide_timer_id = None
 
-
-def load_clicks():
-    global APPS_DATA
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                for app in APPS_DATA:
-                    if app["name"] in saved:
-                        app["clicks"] = saved[app["name"]]
-            print(f"[ІНІЦІАЛІЗАЦІЯ] Дані успішно завантажено з: {DATA_FILE}")
-        except Exception as e:
-            print(f"[ПОМИЛКА] Помилка читання даних: {e}")
-    else:
-        print(f"[ІНІЦІАЛІЗАЦІЯ] Файл даних не знайдено. Буде створено новий: {DATA_FILE}")
-
-
-def save_clicks():
+def _parse_valid_clicks(raw_text: str) -> dict[str, int] | None:
     try:
-        data = {app["name"]: app["clicks"] for app in APPS_DATA}
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        print(f"[УСПІХ] Файл 'data' оновлено! Поточний стан: {data}")
-    except Exception as e:
-        print(f"[ПОМИЛКА] Помилка запису даних: {e}")
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    cleaned: dict[str, int] = {}
+    for key, value in data.items():
+        if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            cleaned[key] = value
+    return cleaned
 
 
-def find_icon_path(icon_names):
-    fallback_dirs = [
-        "/usr/share/icons/Yaru/48x48/apps/",
-        "/usr/share/icons/Yaru/scalable/apps",
-        "/usr/share/icons/hicolor/48x48/apps",
-        "/usr/share/icons/hicolor/scalable/apps",
-        "/usr/share/pixmaps"
-    ]
-    for name in icon_names:
-        for f_dir in fallback_dirs:
-            for ext in [".png", ".svg", ".xpm"]:
-                path = os.path.join(f_dir, f"{name}{ext}")
-                if os.path.exists(path):
-                    return path
-    return None
-
-
-def load_icons():
-    for app in APPS_DATA:
-        icon_path = find_icon_path(app["icon_names"])
-        if icon_path:
+def _write_atomic(target: Path, content: str) -> None:
+    tmp_file = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, target)
+    except Exception:
+        if tmp_file.exists():
             try:
-                pil_img = Image.open(icon_path).resize((32, 32), Image.Resampling.LANCZOS)
-                LOADED_IMAGES[app["name"]] = ImageTk.PhotoImage(pil_img)
+                tmp_file.unlink()
+            except OSError:
+                pass
+        raise
+
+
+class AutoHideDock:
+    FULL_HEIGHT = 46
+    HIDDEN_HEIGHT = 4
+    ICON_SIZE = (32, 32)
+    HIDE_DELAY_MS = 4000
+
+    def __init__(self, root: tk.Tk, apps: list[dict]):
+        self.root = root
+        self.apps = [dict(app) for app in apps]
+        self.images: dict[str, ImageTk.PhotoImage] = {}
+        self.buttons: dict[str, tk.Button] = {}
+        self.panel_width = 300
+        self.hide_timer_id: str | None = None
+
+        self._setup_window()
+        self.load_clicks()
+        self.load_icons()
+        self._create_buttons_once()
+        self.render_dock()
+        self.hide_now()
+
+    def _setup_window(self) -> None:
+        self.root.overrideredirect(True)
+        self.root.wm_attributes("-topmost", True)
+        self.root.configure(bg="#4a4a4a")
+
+        self.dock_frame = tk.Frame(self.root, bg="#aeb2c3", bd=0)
+        self.dock_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.root.bind("<Enter>", self.show_panel)
+        self.root.bind("<Leave>", self.schedule_hide)
+
+    def _apply_clicks(self, clicks_map: dict[str, int]) -> None:
+        for app in self.apps:
+            if app["name"] in clicks_map:
+                app["clicks"] = clicks_map[app["name"]]
+
+    def load_clicks(self) -> None:
+        for candidate in (DATA_FILE, BACKUP_FILE):
+            if not candidate.exists():
                 continue
-            except Exception as e:
-                print(f"Помилка іконки {app['name']}: {e}")
-        
-        # Заглушка, якщо іконка не знайдена
-        blank_img = tk.PhotoImage(width=12, height=12)
-        blank_img.put("#000000", to=(0, 0, 12, 12))
-        LOADED_IMAGES[app["name"]] = blank_img
+            try:
+                parsed = _parse_valid_clicks(candidate.read_text(encoding="utf-8"))
+                if parsed is not None:
+                    self._apply_clicks(parsed)
+                    if candidate == BACKUP_FILE:
+                        self.save_clicks(make_backup=False)
+                    return
+            except Exception as exc:
+                logging.warning("Failed to read %s: %s", candidate.name, exc)
 
+    def save_clicks(self, make_backup: bool = True) -> None:
+        payload = {app["name"]: app["clicks"] for app in self.apps}
+        serialized = json.dumps(payload, ensure_ascii=False, indent=4)
 
-def update_dock(show_text=False):
-    global APPS_DATA, CURRENT_PANEL_WIDTH
-    APPS_DATA = sorted(APPS_DATA, key=lambda x: x["clicks"], reverse=True)
-    
-    for widget in dock_frame.winfo_children():
-        widget.destroy()
-        
-    for app in APPS_DATA:
-        btn_text = f" {app['name'].upper()} [{app['clicks']}] " if show_text else ""
-        
-        btn = tk.Button(
-            dock_frame,
-            text=btn_text,
-            bg="#aeaeae",
-            fg="#000000",
-            activebackground="#8e8e8e",
-            activeforeground="#000000",
-            padx=4,
-            pady=2,
-            compound=tk.LEFT,
-            bd=2,
-            relief=tk.RAISED,
-            font=("Verdana", 6),
-            command=lambda a=app: on_app_click(a)
+        if make_backup and DATA_FILE.exists():
+            try:
+                current_text = DATA_FILE.read_text(encoding="utf-8")
+                if _parse_valid_clicks(current_text) is not None:
+                    _write_atomic(BACKUP_FILE, current_text)
+            except Exception as exc:
+                logging.warning("Failed to update backup %s: %s", BACKUP_FILE.name, exc)
+
+        try:
+            _write_atomic(DATA_FILE, serialized)
+        except Exception as exc:
+            logging.error("Failed to write %s: %s", DATA_FILE.name, exc)
+
+    @staticmethod
+    def find_icon_path(icon_names: list[str]) -> Path | None:
+        icon_dirs = (
+            Path("/usr/share/icons/Yaru/48x48/apps"),
+            Path("/usr/share/icons/Yaru/scalable/apps"),
+            Path("/usr/share/icons/hicolor/48x48/apps"),
+            Path("/usr/share/icons/hicolor/scalable/apps"),
+            Path("/usr/share/pixmaps"),
         )
-        
-        if app["name"] in LOADED_IMAGES:
-            btn.config(image=LOADED_IMAGES[app["name"]])
-            
-        btn.pack(side=tk.LEFT, padx=2, pady=1)
-    
-    root.update_idletasks()
-    screen_width = root.winfo_screenwidth()
-    CURRENT_PANEL_WIDTH = min(dock_frame.winfo_reqwidth() + 12, screen_width)
-    
-    x_pos = (screen_width - CURRENT_PANEL_WIDTH) // 2
-    root.geometry(f"{CURRENT_PANEL_WIDTH}x{root.winfo_height()}+{x_pos}+{root.winfo_y()}")
+        extensions = (".png", ".xpm")
+        for name in icon_names:
+            for directory in icon_dirs:
+                for ext in extensions:
+                    candidate = directory / f"{name}{ext}"
+                    if candidate.is_file():
+                        return candidate
+        return None
+
+    def load_icons(self) -> None:
+        for app in self.apps:
+            icon_path = self.find_icon_path(app["icon_names"])
+            if icon_path:
+                try:
+                    with Image.open(icon_path) as raw_img:
+                        resized = raw_img.resize(self.ICON_SIZE, Image.Resampling.LANCZOS)
+                        self.images[app["name"]] = ImageTk.PhotoImage(resized)
+                    continue
+                except Exception as exc:
+                    logging.warning("Failed to load icon for %s: %s", app["name"], exc)
+
+            fallback = Image.new("RGBA", (16, 16), "#222222")
+            self.images[app["name"]] = ImageTk.PhotoImage(fallback)
+
+    def _create_buttons_once(self) -> None:
+        for app in self.apps:
+            name = app["name"]
+            btn = tk.Button(
+                self.dock_frame,
+                image=self.images.get(name),
+                bg="#aeaeae",
+                activebackground="#8e8e8e",
+                bd=2,
+                relief=tk.RAISED,
+                command=lambda a=app: self.on_app_click(a),
+            )
+            btn.bind("<Button-3>", lambda event, a=app: self._show_context_menu(event, a))
+            self.buttons[name] = btn
+
+    def render_dock(self) -> None:
+        self.apps.sort(key=lambda item: item["clicks"], reverse=True)
+
+        for btn in self.buttons.values():
+            btn.pack_forget()
+
+        for app in self.apps:
+            self.buttons[app["name"]].pack(side=tk.LEFT, padx=2, pady=2)
+
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        self.panel_width = min(max(self.dock_frame.winfo_reqwidth() + 12, 120), screen_w)
+        x_pos = (screen_w - self.panel_width) // 2
+        current_h = max(self.root.winfo_height(), self.HIDDEN_HEIGHT)
+        y_pos = self.root.winfo_screenheight() - current_h
+        self.root.geometry(f"{self.panel_width}x{current_h}+{x_pos}+{y_pos}")
+
+    def _show_context_menu(self, event: tk.Event, app: dict) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=f"{app['name']} (clicks: {app['clicks']})", state=tk.DISABLED)
+        menu.add_command(label="Reset counter", command=lambda: self.reset_clicks(app))
+        menu.add_separator()
+        menu.add_command(label="Quit dock", command=self.root.destroy)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def reset_clicks(self, app: dict) -> None:
+        app["clicks"] = 0
+        self.save_clicks()
+        self.render_dock()
+        self.show_panel()
+
+    def on_app_click(self, app: dict) -> None:
+        app["clicks"] += 1
+        self.save_clicks()
+
+        try:
+            args = shlex.split(app["cmd"])
+            subprocess.Popen(
+                args,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logging.error("Failed to launch %s: %s", app["name"], exc)
+
+        self.render_dock()
+        self.show_panel()
+
+    def show_panel(self, _event: tk.Event | None = None) -> None:
+        if self.hide_timer_id is not None:
+            self.root.after_cancel(self.hide_timer_id)
+            self.hide_timer_id = None
+
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x_pos = (screen_w - self.panel_width) // 2
+        y_pos = screen_h - self.FULL_HEIGHT
+        self.root.geometry(f"{self.panel_width}x{self.FULL_HEIGHT}+{x_pos}+{y_pos}")
+
+    def schedule_hide(self, _event: tk.Event | None = None) -> None:
+        if self.hide_timer_id is not None:
+            self.root.after_cancel(self.hide_timer_id)
+        self.hide_timer_id = self.root.after(self.HIDE_DELAY_MS, self.hide_now)
+
+    def _is_pointer_inside(self) -> bool:
+        px, py = self.root.winfo_pointerxy()
+        x1 = self.root.winfo_rootx()
+        y1 = self.root.winfo_rooty()
+        x2 = x1 + self.root.winfo_width()
+        y2 = y1 + self.root.winfo_height()
+        return x1 <= px <= x2 and y1 <= py <= y2
+
+    def hide_now(self) -> None:
+        self.hide_timer_id = None
+        if self._is_pointer_inside():
+            self.schedule_hide()
+            return
+
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x_pos = (screen_w - self.panel_width) // 2
+        y_pos = screen_h - self.HIDDEN_HEIGHT
+        self.root.geometry(f"{self.panel_width}x{self.HIDDEN_HEIGHT}+{x_pos}+{y_pos}")
 
 
-def on_app_click(app):
-    print(f"\n[КЛИК] Натиснуто на додаток: {app['name']} (кліків до: {app['clicks']})")
-    app["clicks"] += 1
-    print(f"[КЛИК] Нова кількість кліків для {app['name']}: {app['clicks']}")
-    
-    save_clicks()  # Зберігаємо та виводимо статус файлу в термінал
-    
-    try:
-        subprocess.Popen(app["cmd"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[ПОМИЛКА] Помилка запуску {app['name']}: {e}")
-        
-    update_dock()
-    show_panel()
-
-
-def show_panel(event=None):
-    global hide_timer_id
-    if hide_timer_id is not None:
-        root.after_cancel(hide_timer_id)
-        hide_timer_id = None
-        
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x_pos = (screen_width - CURRENT_PANEL_WIDTH) // 2
-    y_pos = screen_height - FULL_HEIGHT
-    
-    root.geometry(f"{CURRENT_PANEL_WIDTH}x{FULL_HEIGHT}+{x_pos}+{y_pos}")
-
-
-def hide_panel_delayed(event=None):
-    global hide_timer_id
-    if hide_timer_id is not None:
-        root.after_cancel(hide_timer_id)
-    hide_timer_id = root.after(5000, execute_hide)
-
-
-def execute_hide():
-    global hide_timer_id
-    hide_timer_id = None
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x_pos = (screen_width - CURRENT_PANEL_WIDTH) // 2
-    y_pos = screen_height - HIDDEN_HEIGHT
-    
-    root.geometry(f"{CURRENT_PANEL_WIDTH}x{HIDDEN_HEIGHT}+{x_pos}+{y_pos}")
-
-
-# Ініціалізація додатку
-root = tk.Tk()
-root.overrideredirect(True)
-root.wm_attributes("-topmost", True)
-root.configure(bg="#4a4a4a")
-
-dock_frame = tk.Frame(root, bg="#aeb2c3", bd=0, relief=tk.SUNKEN)
-dock_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
-
-root.bind("<Enter>", show_panel)
-root.bind("<Leave>", hide_panel_delayed)
-
-load_clicks()
-load_icons()
-update_dock()
-execute_hide()
-
-root.mainloop()
+if __name__ == "__main__":
+    tk_root = tk.Tk()
+    AutoHideDock(tk_root, DEFAULT_APPS)
+    tk_root.mainloop()
